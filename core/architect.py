@@ -1,10 +1,10 @@
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from sqlalchemy import Table, Column, MetaData, Integer, String, ForeignKey, create_engine
+from sqlalchemy import Table, Column, MetaData, Integer, String, ForeignKey, Numeric, Text, DateTime, Boolean ,create_engine
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.dialects import postgresql, sqlite, mysql
-from my_utils.validator import TableSchema
+from my_utils.validator import TableSchema, DatabaseSchema
 from my_utils.llm_handler import generate_sql_func, generate_sql
 
 #1. The Architect (Structure)
@@ -14,61 +14,56 @@ from my_utils.llm_handler import generate_sql_func, generate_sql
 #* **Sandbox Mode:** No DB? No problem. Generate raw SQL scripts for any major dialect (Postgres, MySQL, SQLite) without a connection.
 
 type_map = {"Integer": Integer, "String": String}
+def map_type(type_str : str):
+    type_map = {
+        "int" : Integer(),
+        "varchar" : String(),
+        "decimal" : Numeric(),
+        "text" : Text(),
+        "timestamp" : DateTime(),
+        "boolean" : Boolean()
+    }
+    return type_map.get(type_str, String)
 
-def get_sql_preview(parsed_data: TableSchema):
-    """
-   generate sql from prompt usi
-    """
+
+
+def build_sql(llm_output: dict, dialect: str) -> list[str]:
+    db_schema = DatabaseSchema.model_validate(llm_output)
     metadata = MetaData()
-    
-    # Map AI strings to SQLAlchemy types
-    
-    cols = []
-    for c in parsed_data.columns:
-        # Handle ForeignKeys if provided
-        fk = ForeignKey(c.references) if c.references else None
-        
-        cols.append(Column(
-            c.name, 
-            type_map.get(c.type, String), 
-            fk,
-            primary_key=c.primary_key, 
-            nullable=c.nullable
-        ))
+    statements = []
+    for table in db_schema.tables:
+        cols = []
+        for col in table.columns:
+            fk = ForeignKey(col.references) if col.references else None
+            cols.append(
+                Column(
+                    col.name,
+                    map_type(col.type),
+                    fk,
+                    primary_key=col.primary_key,
+                    nullable=col.nullable
 
-    # Construct the table object
-    table = Table(parsed_data.table_name, metadata, *cols)
-
-    # Use the appropriate dialect for the preview
-    dialects = {
-        "postgresql": postgresql.dialect(),
-        "sqlite": sqlite.dialect(),
-        "mysql": mysql.dialect()
+                )
+            )
+        Table(
+            table.name,
+            metadata,
+            *cols
+        )
+        dialects = {
+            "postgresql": postgresql.dialect(),
+            "sqlite": sqlite.dialect(),
+            "mysql": mysql.dialect()
     }
 
-    # This generates the "CREATE TABLE..." string without executing it
-    statement = CreateTable(table)
-    return str(statement.compile(dialect=dialects.get(parsed_data.dialect, postgresql.dialect())))
+        table_statement = CreateTable(Table)
+        statement = str(table_statement.compile(dialect=dialects.get(dialect, postgresql.dialect())))
+        statements.append(statement)
+    return statements
 
-def create_table_from_json(parsed_json : TableSchema, engine):
-    metadata = MetaData()
-    cols = []
-    try:
-        for col in parsed_json["columns"]:
-            cols.append(
-                Column(col["name"], type_map.get(col["type"], String), ForeignKey(col["references"]), primary_key=col["primary_key"], nullable=col["nullable"])
-            ) 
-    except Exception as e:
-        print(f"error creating table {e}")
-    
-    table = Table(
-        parsed_json["table_name"],
-        metadata,
-        *cols
-    )
-    metadata.create_all(engine)
-    return table
 
-sql_query = generate_sql("create a users table with email and password", TableSchema)
-test = get_sql_preview(sql_query)
+print("genrating schema.....")
+sql_query = generate_sql("create a database for an ecoomerce platform", database_schema=DatabaseSchema)
+print("done")
+test = build_sql(sql_query, "postgres")
 print(test)
