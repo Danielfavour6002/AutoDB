@@ -1,13 +1,17 @@
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from sqlalchemy import Table, Column, MetaData, Integer, String, ForeignKey, create_mock_engine
+from sqlalchemy import Table, Column, MetaData, Integer, String, ForeignKey, create_engine
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.dialects import postgresql, sqlite, mysql
 from my_utils.validator import TableSchema
-from my_utils.llm_handler import generate_sql_func
+from my_utils.llm_handler import generate_sql_func, generate_sql
 
+#1. The Architect (Structure)
+#Design and modify your database using plain English. 
+#* **Intelligent Drafting:** Generates structured JSON schemas before converting them to dialect-specific SQL via SQLAlchemy.
+#* **Reflective Context:** Scans your existing database to suggest `ALTER` commands instead of creating redundant tables.
+#* **Sandbox Mode:** No DB? No problem. Generate raw SQL scripts for any major dialect (Postgres, MySQL, SQLite) without a connection.
 
 type_map = {"Integer": Integer, "String": String}
 
@@ -47,7 +51,6 @@ def get_sql_preview(parsed_data: TableSchema):
     return str(statement.compile(dialect=dialects.get(parsed_data.dialect, postgresql.dialect())))
 
 def create_table_from_json(parsed_json : TableSchema, engine):
-
     metadata = MetaData()
     cols = []
     try:
@@ -66,5 +69,6 @@ def create_table_from_json(parsed_json : TableSchema, engine):
     metadata.create_all(engine)
     return table
 
-ff = generate_sql_func("i want a to create a database with table users, and columsn orders, type", TableSchema)
-print(ff)
+sql_query = generate_sql("create a users table with email and password", TableSchema)
+test = get_sql_preview(sql_query)
+print(test)
