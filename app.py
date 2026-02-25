@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -14,6 +15,19 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ── Inject JS to force sidebar open on every load (clears localStorage) ──
+components.html("""
+<script>
+(function() {
+    for (let key of Object.keys(localStorage)) {
+        if (key.toLowerCase().includes('sidebar')) {
+            localStorage.removeItem(key);
+        }
+    }
+})();
+</script>
+""", height=0)
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
@@ -26,11 +40,16 @@ html, body, .stApp, [class*="css"] {
 #MainMenu, footer, header { visibility: hidden; }
 .block-container { padding: 2rem 2.5rem !important; }
 
+/* ── Hide the collapse/expand arrow permanently ── */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"],
+button[kind="header"] { display: none !important; }
+
 /* ── SIDEBAR ── */
 [data-testid="stSidebar"] {
     background: #0a0914 !important;
     border-right: 1px solid #1e1d2e !important;
-    min-width: 220px !important;
+    min-width: 240px !important;
 }
 [data-testid="stSidebar"] > div:first-child { padding: 1.5rem 1rem !important; }
 
@@ -50,8 +69,6 @@ html, body, .stApp, [class*="css"] {
     font-size: 0.6rem; font-weight: 700; letter-spacing: 2px;
     text-transform: uppercase; color: #888; margin-bottom: 8px;
 }
-
-/* nav uses st.button — no radio CSS needed */
 
 /* ── TOGGLE ── */
 [data-testid="stToggle"] > label { color: #888 !important; font-size: 0.83rem !important; }
@@ -203,15 +220,15 @@ hr { border-color: #1e1d2e !important; margin: 14px 0 !important; }
 
 # ── SESSION STATE ──
 for k, v in {
-    "generated_sql": [],
-    "db_connected":  False,
-    "engine":        None,
-    "db_url":        "",
-    "chat_messages": [],
-    "history":       [],
-    "analyst_history":  [],
-    "analyst_agent": None,
-    "menu": "DB Architect",
+    "generated_sql":   [],
+    "db_connected":    False,
+    "engine":          None,
+    "db_url":          "",
+    "chat_messages":   [],
+    "history":         [],
+    "analyst_history": [],
+    "analyst_agent":   None,
+    "menu":            "DB Architect",
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -222,7 +239,6 @@ DIALECTS = {
     "Oracle":     "oracle",     "MariaDB": "mariadb",
 }
 
-# Safe defaults
 dialect   = "postgresql"
 live_mode = False
 menu      = st.session_state.get("menu", "DB Architect")
@@ -238,35 +254,29 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # Navigation
     st.markdown('<div class="sb-label">Navigation</div>', unsafe_allow_html=True)
     nav_c1, nav_c2 = st.columns(2, gap="small")
     with nav_c1:
-        arch_type = "primary" if st.session_state.menu == "DB Architect" else "secondary"
-        if st.button("Architect", key="nav_arch", use_container_width=True, type=arch_type):
+        if st.button("Architect", key="nav_arch", use_container_width=True,
+                     type="primary" if st.session_state.menu == "DB Architect" else "secondary"):
             st.session_state.menu = "DB Architect"
             st.rerun()
     with nav_c2:
-        anal_type = "primary" if st.session_state.menu == "DB Analyst" else "secondary"
-        if st.button("Analyst", key="nav_anal", use_container_width=True, type=anal_type):
+        if st.button("Analyst", key="nav_anal", use_container_width=True,
+                     type="primary" if st.session_state.menu == "DB Analyst" else "secondary"):
             st.session_state.menu = "DB Analyst"
             st.rerun()
     menu = st.session_state.menu
 
     st.markdown("<br>", unsafe_allow_html=True)
-
-    # Environment toggle
     st.markdown('<div class="sb-label">Environment</div>', unsafe_allow_html=True)
     live_mode = st.toggle("Live Mode", value=False)
 
     st.markdown("<br>", unsafe_allow_html=True)
-
-    # Dialect always visible
     st.markdown('<div class="sb-label">SQL Dialect</div>', unsafe_allow_html=True)
     dialect_name = st.selectbox("Dialect", list(DIALECTS.keys()), label_visibility="collapsed")
     dialect = DIALECTS[dialect_name]
 
-    # Live mode extras
     if live_mode:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="sb-label">Connection String</div>', unsafe_allow_html=True)
@@ -275,16 +285,15 @@ with st.sidebar:
             placeholder="postgresql://user:password@host/db",
             label_visibility="collapsed"
         )
-
         if st.button("Connect", type="primary", use_container_width=True):
             if db_url_input.strip():
                 with st.spinner("Connecting..."):
                     try:
                         engine = get_engine(db_url_input)
-                        st.session_state.engine       = engine
-                        st.session_state.db_url       = db_url_input
-                        st.session_state.db_connected = True
-                        st.session_state.analyst_agent = None  # reset agent on new connection
+                        st.session_state.engine        = engine
+                        st.session_state.db_url        = db_url_input
+                        st.session_state.db_connected  = True
+                        st.session_state.analyst_agent = None
                         st.success("Connected successfully")
                     except Exception as e:
                         st.session_state.db_connected = False
@@ -298,13 +307,11 @@ with st.sidebar:
         else:
             st.markdown('<div class="conn-pill"><div class="dot dot-off"></div>Not connected</div>', unsafe_allow_html=True)
     else:
-        # Reset connection when toggling back to sandbox
         st.session_state.db_connected = False
         st.session_state.engine       = None
         st.session_state.analyst_agent = None
         st.markdown('<div class="conn-pill"><div class="dot dot-sandbox"></div>Sandbox mode</div>', unsafe_allow_html=True)
 
-    # History
     has_arch    = bool(st.session_state.history)
     has_analyst = bool(st.session_state.analyst_history)
 
