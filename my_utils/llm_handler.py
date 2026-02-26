@@ -1,67 +1,93 @@
 import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from langchain_groq import ChatGroq
-from langchain_core.prompts import PromptTemplate
+import re
 import json
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage, HumanMessage
 
-from dotenv import load_dotenv
-load_dotenv()
+MODELS = [
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
+    "gemma2-9b-it",
+    "llama3-70b-8192",
+]
+
+SYSTEM_PROMPT = """You are a database schema expert. Convert natural language descriptions into structured JSON representing a relational database schema.
+
+Return ONLY valid JSON matching this exact structure — no explanation, no markdown, no extra text:
+{
+  "tables": [
+    {
+      "name": "table_name",
+      "columns": [
+        {
+          "name": "column_name",
+          "type": "INTEGER | VARCHAR(255) | TEXT | BOOLEAN | TIMESTAMP | DECIMAL(10,2)",
+          "primary_key": true | false,
+          "nullable": true | false,
+          "unique": true | false,
+          "foreign_key": {"table": "other_table", "column": "id"} | null
+        }
+      ]
+    }
+  ]
+}
+
+Rules:
+- Every table must have an 'id' INTEGER primary_key column
+- Use snake_case for all names
+- Foreign key columns must be named <table>_id
+- foreign_key field must reference a table that exists in the schema
+- nullable is false for primary keys, true for optional fields
+"""
 
 
-def generate_sql_func(user_prompt:str):
-    llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=os.getenv("GROQ_API_KEY"),
-    temperature=0
-)
-    template = """
-    You are a database architect. Respond ONLY with valid JSON, no explanation, no markdown.
+def _is_rate_limit(err: str) -> bool:
+    return any(x in str(err) for x in [
+        "rate_limit_exceeded", "429",
+        "decommissioned", "no longer supported"
+    ])
 
-    ALWAYS follow this EXACT format:
-    {{
-        "tables": [
-            {{
-                "name": "table_name",
-                "columns": [
-                    {{
-                        "name": "id",
-                        "type": "int",
-                        "primary_key": true,
-                        "nullable": false,
-                        "unique": false,
-                        "default": null,
-                        "foreign_key": null
-                    }},
-                    {{
-                        "name": "user_id",
-                        "type": "int",
-                        "primary_key": false,
-                        "nullable": true,
-                        "unique": false,
-                        "default": null,
-                        "foreign_key": {{"table": "users", "column": "id"}}
-                    }}
-                ]
-            }}
-        ]
-    }}
 
-    RULES:
-    - foreign_key must ALWAYS be {{"table": "...", "column": "..."}} or null, never a string
-    - type must be one of: int, varchar(n), text, decimal(n,n), timestamp, boolean
-    - always include all fields for every column even if null or false
+def _clean_json(raw: str) -> str:
+    raw = re.sub(r"```json\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"```", "", raw)
+    return raw.strip()
 
-    User request: {question}
+
+def generate_sql_func(prompt: str) -> dict:
     """
-    prompt = PromptTemplate(
-        template=template,
-        input_variables=["question"]
-    )
-    chain = prompt | llm
-    response = chain.invoke({
-        "question" : user_prompt,
-    })
-    text = response.content.strip()
-    return json.loads(text)
+    Architect: send natural language prompt, return parsed JSON schema dict.
+    Uses LangChain ChatGroq with model fallback chain.
+    """
+    last_error = ""
 
+    for model in MODELS:
+        try:
+            llm = ChatGroq(
+                model=model,
+                api_key=os.getenv("GROQ_API_KEY"),
+                temperature=0,
+                max_tokens=2048,
+            )
+
+            response = llm.invoke([
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ])
+
+            clean = _clean_json(response.content)
+            return json.loads(clean)
+
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Model returned invalid JSON: {e}\n\nRaw:\n{response.content}")
+
+        except Exception as e:
+            err = str(e)
+            if _is_rate_limit(err):
+                last_error = err
+                continue
+            raise RuntimeError(f"LLM error: {err}")
+
+    retry_match = re.search(r"Please try again in (\d+m[\d.]+s|\d+s)", last_error)
+    retry_str   = retry_match.group(1) if retry_match else "a few minutes"
+    raise RuntimeError(f"All models are rate-limited. Try again in {retry_str}.")
