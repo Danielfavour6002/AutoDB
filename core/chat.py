@@ -8,12 +8,68 @@ from langchain_community.utilities import SQLDatabase
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-MODELS = [
+# Static fallback list — used if API fetch fails
+_FALLBACK_MODELS = [
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "qwen/qwen-3-32b",
     "gemma2-9b-it",
     "llama3-70b-8192",
 ]
+
+# Prefer these model families for SQL tasks (ranked by quality/speed)
+_PREFERRED_PREFIXES = [
+    "llama-3.3", "llama-3.1", "llama-4",
+    "qwen", "gemma", "llama3",
+]
+
+_MODELS_CACHE: list = []
+
+
+def _get_models() -> list:
+    """
+    Fetch active models from Groq API at runtime.
+    Falls back to static list if fetch fails.
+    Cached after first call.
+    """
+    global _MODELS_CACHE
+    if _MODELS_CACHE:
+        return _MODELS_CACHE
+
+    try:
+        import requests
+        resp = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={
+                "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}",
+                "Content-Type": "application/json",
+            },
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            all_models = [
+                m["id"] for m in resp.json().get("data", [])
+                # Only text chat models — skip whisper, tts, guard, image
+                if not any(x in m["id"].lower() for x in [
+                    "whisper", "tts", "guard", "safeguard", "image", "vision"
+                ])
+            ]
+            # Sort by preferred prefix order
+            def rank(m):
+                for i, prefix in enumerate(_PREFERRED_PREFIXES):
+                    if m.lower().startswith(prefix):
+                        return i
+                return len(_PREFERRED_PREFIXES)
+
+            _MODELS_CACHE = sorted(all_models, key=rank)
+            return _MODELS_CACHE
+    except Exception:
+        pass
+
+    _MODELS_CACHE = _FALLBACK_MODELS
+    return _MODELS_CACHE
 
 # ── One-time cache per engine ──────────────────────────────────────
 # Schema is reflected ONCE on first query, stored in memory.
@@ -70,6 +126,11 @@ def _execute_with_fix(engine, sql, llm, max_retries=2) -> str:
     db = _DB_CACHE[id(engine)]
     FIX = ChatPromptTemplate.from_template(
         "This SQL failed:\n{sql}\n\nError:\n{error}\n\n"
+        "Available tables (use EXACT names, always double-quoted): {tables}\n\n"
+        "Fix the SQL. Rules:\n"
+        "- Wrap every table name and column name in double quotes\n"
+        "- Use only exact table/column names from the schema\n"
+        "- PostgreSQL is case-sensitive — double quotes are required\n"
         "Return ONLY the corrected SQL — no explanation, no markdown, no semicolons."
     )
     for attempt in range(max_retries + 1):
@@ -78,7 +139,8 @@ def _execute_with_fix(engine, sql, llm, max_retries=2) -> str:
         except Exception as e:
             err = str(e)
             if attempt < max_retries:
-                fixed = (FIX | llm | StrOutputParser()).invoke({"sql": sql, "error": err})
+                tables = ", ".join(_TABLES_CACHE[id(engine)])
+                fixed = (FIX | llm | StrOutputParser()).invoke({"sql": sql, "error": err, "tables": tables})
                 sql   = _clean_sql(fixed)
             else:
                 raise Exception(err)
@@ -100,10 +162,15 @@ Answer:""")
 
 SQL_PROMPT = ChatPromptTemplate.from_template("""You are a SQL expert. Write a single SQL query to answer the question.
 
-IMPORTANT:
-- Only use columns that actually exist in the schema below
-- Do not guess or invent column names
+STRICT RULES:
+- Use ONLY the exact table names from "Available tables" — do not shorten, rename, or guess
+- Always wrap table names AND column names in double quotes e.g. "Bookings_booking", "Users_user"
+- This is critical for PostgreSQL where identifiers are case-sensitive
+- Use ONLY columns that exist in the schema — do not invent column names
 - Return ONLY the raw SQL — no explanation, no markdown, no semicolons
+
+Available tables (use these EXACT names, always double-quoted):
+{tables}
 
 Schema:
 {schema}
@@ -133,7 +200,7 @@ def query_agent(engine, question: str) -> Tuple[str, Optional[str]]:
 
     last_error = ""
 
-    for model in MODELS:
+    for model in _get_models():
         try:
             llm = ChatGroq(
                 model=model,
@@ -157,6 +224,7 @@ def query_agent(engine, question: str) -> Tuple[str, Optional[str]]:
             # create_sql_query_chain avoided: it runs UNION ALL MAX(id) across all
             # tables before every query which hallucnates tables and wastes tokens
             raw_sql = (SQL_PROMPT | llm | StrOutputParser()).invoke({
+                "tables":   ", ".join(_TABLES_CACHE[id(engine)]),
                 "schema":   schema,
                 "question": question,
             })
